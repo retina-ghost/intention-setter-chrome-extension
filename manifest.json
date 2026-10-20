@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "Intention Setter",
+  "version": "1.0.0",
+  "description": "A floating intention panel with a focus timer and to-do list that checks in when your time is up.",
+  "permissions": ["storage", "alarms", "notifications"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Show / hide Intention Setter"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
