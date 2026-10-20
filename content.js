@@ -97,7 +97,9 @@
 
   // ---------- DOM ----------
 
-  const host = document.createElement('div');
+  // A custom element (not a <div>) so site rules that target divs - e.g. hiding
+  // empty divs on YouTube/GitHub - never match the panel host.
+  const host = document.createElement('intention-setter-root');
   host.id = 'intention-setter-root';
   host.style.cssText =
     'all: initial; position: fixed; z-index: 2147483647; right: 16px; bottom: 16px;';
@@ -292,7 +294,9 @@
   }
 
   function render() {
-    host.style.display = state.panelVisible ? '' : 'none';
+    // Always set an explicit, !important value: clearing it ('') lets page
+    // stylesheets decide, and some sites (YouTube, GitHub) then hide the panel.
+    host.style.setProperty('display', state.panelVisible ? 'block' : 'none', 'important');
 
     // Position
     if (state.position) {
