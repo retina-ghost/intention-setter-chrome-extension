@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Intention Setter",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A floating intention panel with a focus timer and to-do list that checks in when your time is up.",
   "permissions": ["storage", "alarms", "notifications"],
   "background": {
