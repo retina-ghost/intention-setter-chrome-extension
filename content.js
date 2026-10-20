@@ -17,8 +17,14 @@
     todos: [] // [{ id, text, done }]
   };
 
+  // How long to wait for the background service worker before telling the user.
+  const RESPONSE_TIMEOUT_MS = 5000;
+  const SERVICE_DOWN_MSG =
+    'Timer service is not running. Open chrome://extensions, reload Intention Setter, then refresh this page.';
+
   let state = { ...DEFAULTS };
   let tickTimer = null;
+  let pending = false;
 
   // ---------- Storage / messaging helpers ----------
 
@@ -36,25 +42,64 @@
     chrome.storage.local.set(partial);
   }
 
-  function send(message) {
+  function friendlyError(message) {
+    const text = String(message || 'Unknown error');
+    if (/Receiving end does not exist|Could not establish connection|message port closed/i.test(text)) {
+      return SERVICE_DOWN_MSG;
+    }
+    return text;
+  }
+
+  // Sends a command to the background worker. On success the returned state is
+  // applied and rendered right away; on any failure a visible error is shown.
+  function send(message, { onSuccess, onFailure } = {}) {
     if (!contextAlive()) {
       showError('Extension was updated - please reload this page.');
+      if (onFailure) onFailure();
       return;
     }
-    chrome.runtime.sendMessage(message, (res) => {
-      if (chrome.runtime.lastError) {
-        showError(chrome.runtime.lastError.message);
-      } else if (res && !res.ok) {
-        showError(res.error);
-      } else {
-        showError('');
+    if (pending) return;
+
+    let settled = false;
+    let timeoutId = null;
+    const finish = (error, res) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      setPending(false);
+      if (error) {
+        showError(friendlyError(error));
+        if (onFailure) onFailure();
+        return;
       }
-    });
+      showError('');
+      if (res && res.state) {
+        Object.assign(state, res.state);
+        render();
+      }
+      if (onSuccess) onSuccess();
+    };
+
+    setPending(true);
+    timeoutId = setTimeout(() => finish(SERVICE_DOWN_MSG), RESPONSE_TIMEOUT_MS);
+    try {
+      chrome.runtime.sendMessage(message, (res) => {
+        const err = chrome.runtime.lastError;
+        if (err) finish(err.message);
+        else if (!res) finish(SERVICE_DOWN_MSG);
+        else if (!res.ok) finish(res.error);
+        else finish(null, res);
+      });
+    } catch (e) {
+      finish((e && e.message) || e);
+    }
   }
 
   // ---------- DOM ----------
 
-  const host = document.createElement('div');
+  // A custom element (not a <div>) so site rules that target divs - e.g. hiding
+  // empty divs on YouTube/GitHub - never match the panel host.
+  const host = document.createElement('intention-setter-root');
   host.id = 'intention-setter-root';
   host.style.cssText =
     'all: initial; position: fixed; z-index: 2147483647; right: 16px; bottom: 16px;';
@@ -94,11 +139,15 @@
       }
       button.btn.secondary { background: #fff; color: #4f46e5; }
       button.btn:hover { filter: brightness(1.08); }
+      button.btn:disabled { opacity: .6; cursor: progress; }
       .intention-text { font-weight: 600; font-size: 14px; word-break: break-word; }
       .countdown { font-size: 28px; font-variant-numeric: tabular-nums; font-weight: 700; text-align: center; }
       .checkin { background: #fef3c7; border: 1px solid #f59e0b; border-radius: 8px; padding: 8px; }
       .done-msg { background: #dcfce7; border: 1px solid #22c55e; border-radius: 8px; padding: 8px; }
-      .error { color: #b91c1c; font-size: 12px; }
+      .error {
+        color: #b91c1c; font-size: 12px; background: #fef2f2; border: 1px solid #fecaca;
+        border-radius: 6px; padding: 6px 8px;
+      }
       .error:empty { display: none; }
       ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
       li { display: flex; align-items: center; gap: 6px; }
@@ -152,7 +201,7 @@
           </div>
         </div>
 
-        <div class="error"></div>
+        <div class="error" role="alert"></div>
 
         <div class="todos">
           <div class="section-label">To-do list</div>
@@ -199,6 +248,16 @@
     clearDone: $('.clear-done')
   };
 
+  const timerButtons = [
+    el.startBtn,
+    el.completeBtn,
+    el.cancelBtn,
+    el.yesBtn,
+    el.extend5,
+    el.extend15,
+    el.endBtn
+  ];
+
   // Stop keystrokes inside the panel from triggering page shortcuts (e.g. YouTube, Gmail).
   ['keydown', 'keyup', 'keypress'].forEach((type) =>
     shadow.addEventListener(type, (e) => e.stopPropagation())
@@ -219,6 +278,14 @@
     el.error.textContent = message || '';
   }
 
+  function setPending(value) {
+    pending = value;
+    timerButtons.forEach((btn) => {
+      btn.disabled = value;
+    });
+    el.startBtn.textContent = value ? 'Starting\u2026' : 'Start';
+  }
+
   function updateCountdown() {
     if (state.status !== 'running' || !state.endTime) return;
     const text = formatRemaining(state.endTime - Date.now());
@@ -227,7 +294,9 @@
   }
 
   function render() {
-    host.style.display = state.panelVisible ? '' : 'none';
+    // Always set an explicit, !important value: clearing it ('') lets page
+    // stylesheets decide, and some sites (YouTube, GitHub) then hide the panel.
+    host.style.setProperty('display', state.panelVisible ? 'block' : 'none', 'important');
 
     // Position
     if (state.position) {
@@ -308,6 +377,7 @@
   // ---------- Actions ----------
 
   function startIntention() {
+    if (pending) return;
     const intention = el.intentionInput.value.trim();
     const durationMin = Number(el.minutesInput.value);
     if (!intention) {
@@ -320,8 +390,11 @@
       el.minutesInput.focus();
       return;
     }
-    el.intentionInput.value = '';
-    send({ type: 'start', intention, durationMin });
+    // Keep the text until the timer has actually started, so nothing is lost on failure.
+    send(
+      { type: 'start', intention, durationMin },
+      { onSuccess: () => (el.intentionInput.value = '') }
+    );
   }
 
   function addTodo() {
